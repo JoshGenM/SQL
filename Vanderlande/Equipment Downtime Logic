@@ -1,0 +1,35 @@
+WITH ordered_alarms AS (
+    SELECT
+        terminal,
+        equipment_id,
+        description,
+        CONCAT(description, '_T', terminal) AS alarm_ID,
+        CAST(dt_came_in AS DATE) AS alarm_date,
+        dt_came_in,
+        dt_went_out,
+        LAG(dt_went_out) OVER (
+            PARTITION BY equipment_id, CAST(dt_came_in AS DATE)
+            ORDER BY dt_came_in
+        ) AS prev_end
+    FROM bpi_reports.scada_alarm_details
+),
+grouped_alarms AS (
+    SELECT *,
+        CASE
+            WHEN prev_end IS NULL
+              OR dt_came_in > prev_end
+            THEN 1
+            ELSE 0
+        END AS new_group
+    FROM ordered_alarms
+),
+downtime_blocks AS (
+    SELECT *,
+        SUM(new_group) OVER (
+            PARTITION BY equipment_id, alarm_date
+            ORDER BY dt_came_in
+        ) AS downtime_block_id
+    FROM grouped_alarms
+)
+SELECT *
+FROM downtime_blocks;
