@@ -1,0 +1,7 @@
+SELECT TOP (1000) class, count(*)
+  FROM [bpi_reports].[scada_alarm_details]
+  Where 
+  date_came_in<> date_went_out AND
+  date_came_in >= '2025-12-01' AND date_came_in < '2025-12-31' AND
+  duration <>0
+  GROUP BY class
