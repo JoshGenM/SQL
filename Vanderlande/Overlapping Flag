@@ -1,0 +1,161 @@
+WITH [source] AS (
+    SELECT
+        [MSGNR] AS [id]
+        ,[EVENTTIME] AS [event_timestamp]
+        ,[EVENTTS_DATE] AS [event_date]
+        ,[AREAID] AS [area]
+        ,[ZONEID] AS [zone]
+        ,[EQUIPMENTID] AS [equipment]
+        ,[ERRORTYPE] AS [error_type]
+        ,[L_DESCRIPTION] AS [description]
+        ,[SEVERITY] AS [severity]
+        ,[STATE] AS [state]
+    FROM
+        [terminal_3_native].[EQUIPMENTEVENTREPORT]
+    WHERE
+        [EVENTTS_DATE] = '2026-01-01' --DATEADD(DAY, -1, CAST(GETDATE() AS DATE))
+        AND [MSGNR] != ''
+        AND [STATE] IN ('CAME_IN','WENT_OUT')
+        AND [SEVERITY] IN (
+            'LOW'
+            ,'MEDIUM'
+            ,'HIGH'
+            ,'SAFETY'
+            ,'INFO'
+        )
+ 
+        -- AND AREAID = 7740
+        -- AND ZONEID = 01
+        -- AND EQUIPMENTID = 69
+        -- AND [L_DESCRIPTION] = 'Con. BSO not established'
+),
+ 
+-- Transposed WENT_OUT timestamp to same row as CAME_IN.
+-- Where there are multiple WENT_OUT events after a single CAME_IN only the earliest is taken.
+[unpivot_state] AS (
+    SELECT
+        [id]
+        ,[event_date]
+        ,[event_timestamp]
+        ,[state]
+        ,CASE WHEN [state] = 'CAME_IN' THEN LEAD([event_timestamp]) OVER (PARTITION BY [event_date], [id] ORDER BY [event_timestamp], [state] ASC) END AS [next_timestamp]
+        ,CASE WHEN [state] = 'CAME_IN' THEN LEAD([state]) OVER (PARTITION BY [event_date], [id] ORDER BY [event_timestamp], [state] ASC) END AS [next_state]
+        ,CASE WHEN [state] = 'CAME_IN' THEN LEAD([event_timestamp], 2) OVER (PARTITION BY [event_date], [id] ORDER BY [event_timestamp], [state] ASC) END AS [next_timestamp_2]
+        ,CASE WHEN [state] = 'CAME_IN' THEN LEAD([state], 2) OVER (PARTITION BY [event_date], [id] ORDER BY [event_timestamp], [state] ASC) END AS [next_state_2]
+        ,[area]
+        ,[zone]
+        ,[equipment]
+        ,[error_type]
+        ,[description]
+        ,[severity]
+    FROM
+        [source]
+),
+ 
+[timestamp_finished_data] AS (
+    SELECT
+        [id]
+        ,[event_date]
+        ,[event_timestamp]
+        ,CASE
+            WHEN [next_state] = 'WENT_OUT' THEN [next_timestamp]
+            WHEN [next_state_2] = 'WENT_OUT' THEN [next_timestamp_2]
+            ELSE NULL
+        END AS [event_timestamp_finished]
+        ,[area]
+        ,[zone]
+        ,[equipment]
+        ,[error_type]
+        ,[description]
+        ,[severity]
+    FROM
+        [unpivot_state]
+),
+ 
+-- Added duration column in seconds and area zone equipment column
+-- Also filter out rows with NULL in event timestamp finished (rows with state WENT_OUT) and any rows where there is no value in the equipment column
+[added_columns] AS (
+    SELECT
+        [id]
+        ,[event_date]
+        ,[event_timestamp]
+        ,[event_timestamp_finished]
+        ,DATEDIFF(SECOND, [event_timestamp], [event_timestamp_finished]) AS [duration_seconds]
+        ,CONCAT([area], '.', [zone], '.', [equipment]) AS [area_zone_equipment]
+        ,[area]
+        ,[zone]
+        ,[equipment]
+        ,[error_type]
+        ,[description]
+        ,[severity]
+    FROM
+        [timestamp_finished_data]
+    WHERE
+        [event_timestamp_finished] != ''
+        AND [equipment] != ''
+),
+ 
+-- -- Cleaned values inside columns and filtered out any alarms with a duration of zero
+[clean_dataset] AS (
+    SELECT
+        [id]
+        ,[event_date]
+        ,CAST([event_timestamp] AS DATETIME2(0)) AS [event_timestamp]
+        ,CAST([event_timestamp_finished] AS DATETIME2(0)) AS [event_timestamp_finished]
+        ,[duration_seconds]
+        ,'T3.' + [area_zone_equipment] AS [equipment_id]
+        ,'T3' AS [terminal]
+        --,[area_zone_equipment]
+        --,[area]
+        --,[zone]
+        --,[equipment]
+        ,CASE
+            WHEN [error_type] = 'OPERATIONAL' THEN 'Operational'
+            WHEN [error_type] = 'TECHNICAL' THEN 'Technical'
+            WHEN [error_type] = 'MODE' THEN 'Mode'
+            ELSE '-'
+        END AS [error_type]
+        ,[description]
+        ,CASE
+            WHEN [severity] = 'INFO' THEN 'Info'
+            WHEN [severity] = 'SAFETY' THEN 'Safety'
+            WHEN [severity] = 'LOW' THEN 'Low'
+            WHEN [severity] = 'MEDIUM' THEN 'Medium'
+            WHEN [severity] = 'HIGH' THEN 'High'
+            ELSE '-'
+        END AS [severity]
+    FROM
+        [added_columns]
+    -- WHERE
+    --     [duration_seconds] > 0
+),
+ 
+-- SELECT
+--     *
+--     ,'T3'+[error_type]+[severity]+[description] AS [alarm_id]
+-- FROM [clean_dataset] ORDER BY [event_timestamp] ASC
+ 
+[final_data] AS (
+    SELECT
+        *
+        ,'T3'+[error_type]+[severity]+[description] AS [alarm_id]
+    FROM [clean_dataset]
+),
+ 
+[overlap_flag] AS (
+    SELECT
+        a.*
+        ,CASE
+            WHEN EXISTS (
+                SELECT 1 FROM [final_data] b
+                WHERE a.[equipment_id] = b.[equipment_id]
+                AND a.[id] != b.[id]
+                AND a.[event_timestamp] < b.[event_timestamp_finished]
+                AND a.[event_timestamp_finished] > b.[event_timestamp]
+            ) THEN 1
+            ELSE 0
+        END AS [has_overlap]
+    FROM [final_data] a
+)
+ 
+SELECT * FROM [overlap_flag] ORDER BY [event_timestamp] ASC -- WHERE [has_overlap] = 1
